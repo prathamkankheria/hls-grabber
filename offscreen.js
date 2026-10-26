@@ -1,6 +1,5 @@
-const DEBUG_RAW_TS = true;   // true = save raw .ts so we can test for audio; set false for MP4 output
+const DEBUG_RAW_TS = false;
 const CONCURRENCY = 8;
-const worker = new Worker("mux-worker.js");
 let current = null; // {tabId, title}
 
 const send = m => chrome.runtime.sendMessage(m).catch(() => {});
@@ -82,12 +81,50 @@ function stripToTS(u8) {
   return u8;
 }
 
+let ff = null;
+async function getFF() {
+  if (ff) return ff;
+  const f = new FFmpegWASM.FFmpeg();
+  await f.load({
+    coreURL: chrome.runtime.getURL("ffmpeg-core.js"),
+    wasmURL: chrome.runtime.getURL("ffmpeg-core.wasm"),
+    classWorkerURL: chrome.runtime.getURL("814.ffmpeg.js")
+  });
+  ff = f;
+  return ff;
+}
+
+async function remux(results) {
+  let total = 0;
+  for (const r of results) total += r.length;
+  const all = new Uint8Array(total);
+  let off = 0;
+  for (const r of results) { all.set(r, off); off += r.length; }
+  results.length = 0; // let the segment copies be freed
+
+  const f = await getFF();
+  await f.writeFile("in.ts", all);
+  const code = await f.exec([
+    "-i", "in.ts",
+    "-c", "copy",
+    "-bsf:a", "aac_adtstoasc",
+    "-avoid_negative_ts", "make_zero",
+    "-movflags", "+faststart",
+    "out.mp4"
+  ]);
+  if (code !== 0) throw new Error("ffmpeg failed with code " + code);
+  const out = await f.readFile("out.mp4");
+  await f.deleteFile("in.ts");
+  await f.deleteFile("out.mp4");
+  return new Blob([out], { type: "video/mp4" });
+}
+
 async function run(m3u8Url) {
   const { tabId } = current;
   const report = (done, total, status) => send({ type: "progress", tabId, done, total, status });
 
   report(0, 0, "Reading playlist…");
-  const { segs, map, ended, duration } = parseMedia(await resolveMedia(m3u8Url));
+  const { segs, map, ended } = parseMedia(await resolveMedia(m3u8Url));
   if (!segs.length) throw new Error("No segments found in playlist");
 
   const results = new Array(segs.length);
@@ -128,10 +165,9 @@ async function run(m3u8Url) {
   }
 
   report(done, segs.length, "Converting to MP4…");
-  worker.onmessage = e => finish(e.data, "mp4", tabId);
-  worker.onerror = e => send({ type: "error", tabId, error: "Remux failed: " + e.message });
-  worker.postMessage({ segs: results, duration }, results.map(r => r.buffer));
+  finish(await remux(results), "mp4", tabId);
 }
+
 
 function finish(blob, ext, tabId) {
   if (!blob.size) return send({ type: "error", tabId, error: "Output is empty (unsupported codec/format?)" });
