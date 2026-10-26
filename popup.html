@@ -5,57 +5,53 @@
 <style>
   * { box-sizing: border-box; }
   body {
-    width: 400px; margin: 0; padding: 14px;
+    width: 420px; margin: 0; padding: 14px;
     font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
     background: #0f172a; color: #e2e8f0;
   }
-  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-  h1 { font-size: 15px; margin: 0; letter-spacing: .3px; }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  h1 { font-size: 15px; margin: 0; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: #94a3b8; margin: 14px 0 6px; display: flex; justify-content: space-between; align-items: center; }
   .next { font-size: 12px; color: #94a3b8; }
   .next b { color: #38bdf8; font-family: ui-monospace, Consolas, monospace; }
 
   .card {
     background: #1e293b; border: 1px solid #334155; border-radius: 10px;
     padding: 10px; margin-bottom: 8px; cursor: pointer;
-    transition: border-color .15s, transform .1s, background .15s;
+    transition: border-color .15s, background .15s;
   }
   .card:hover { border-color: #38bdf8; background: #243449; }
-  .card:active { transform: scale(.99); }
   .row { display: flex; align-items: center; gap: 8px; }
-  .badge {
-    flex: none; background: #0ea5e9; color: #04121f; font-weight: 700;
-    font-size: 11px; padding: 2px 7px; border-radius: 999px;
-  }
+  .badge { flex: none; background: #0ea5e9; color: #04121f; font-weight: 700; font-size: 11px; padding: 2px 7px; border-radius: 999px; }
   .badge.unk { background: #475569; color: #e2e8f0; }
   .dl { margin-left: auto; font-size: 11px; color: #38bdf8; flex: none; }
+  .dl.in { color: #4ade80; }
 
-  /* marquee */
-  .marq { overflow: hidden; white-space: nowrap; flex: 1; min-width: 0;
-          font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: #cbd5e1; }
+  .marq { overflow: hidden; white-space: nowrap; flex: 1; min-width: 0; font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: #cbd5e1; }
   .marq span { display: inline-block; }
   .marq.scroll span { padding-left: 100%; animation: marq var(--d, 12s) linear infinite; }
   .card:hover .marq.scroll span { animation-play-state: paused; }
   @keyframes marq { from { transform: translateX(0); } to { transform: translateX(-100%); } }
 
-  .empty { text-align: center; color: #94a3b8; padding: 22px 0; }
+  .empty { text-align: center; color: #94a3b8; padding: 16px 0; }
 
-  #statusBox { margin-top: 10px; }
-  #status { font-size: 12px; color: #cbd5e1; word-break: break-word; }
-  #status.err { color: #f87171; }
-  #status.ok { color: #4ade80; }
-  progress {
-    width: 100%; height: 8px; margin-top: 6px; display: none;
-    -webkit-appearance: none; appearance: none; border: 0; border-radius: 99px; overflow: hidden;
-    background: #334155;
-  }
-  progress::-webkit-progress-bar { background: #334155; }
-  progress::-webkit-progress-value { background: linear-gradient(90deg, #0ea5e9, #22d3ee); transition: width .3s; }
+  .job { background: #162032; border: 1px solid #334155; border-radius: 10px; padding: 8px 10px; margin-bottom: 6px; }
+  .job .name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: #cbd5e1; }
+  .job .state { flex: none; font-size: 11px; color: #94a3b8; }
+  .job.running { border-color: #0ea5e9; }
+  .job.done .state { color: #4ade80; }
+  .job.error .state { color: #f87171; }
+  .job .txt { font-size: 11px; color: #94a3b8; margin-top: 4px; word-break: break-word; }
+  .job.error .txt { color: #f87171; }
+  .job progress { width: 100%; height: 6px; margin-top: 5px; display: none; -webkit-appearance: none; appearance: none; border: 0; border-radius: 99px; overflow: hidden; background: #334155; }
+  .job progress::-webkit-progress-bar { background: #334155; }
+  .job progress::-webkit-progress-value { background: linear-gradient(90deg, #0ea5e9, #22d3ee); }
 
-  button#reset {
-    margin-top: 12px; width: 100%; padding: 8px; border-radius: 8px; cursor: pointer;
-    background: transparent; color: #f87171; border: 1px solid #7f1d1d; font-size: 12px;
-  }
-  button#reset:hover { background: #7f1d1d33; }
+  button { cursor: pointer; font-size: 12px; border-radius: 8px; }
+  .small { background: #0ea5e9; color: #04121f; border: 0; padding: 4px 10px; font-weight: 600; text-transform: none; letter-spacing: 0; }
+  .ghost { background: transparent; color: #94a3b8; border: 1px solid #334155; padding: 3px 9px; text-transform: none; letter-spacing: 0; }
+  #reset { margin-top: 12px; width: 100%; padding: 8px; background: transparent; color: #f87171; border: 1px solid #7f1d1d; }
+  #reset:hover { background: #7f1d1d33; }
 </style>
 </head>
 <body>
@@ -64,12 +60,11 @@
     <div class="next">Next file: <b id="next">001.mp4</b></div>
   </header>
 
+  <h2><span>Detected streams</span><button class="small" id="queueAll">+ Queue all</button></h2>
   <div id="list"></div>
 
-  <div id="statusBox">
-    <div id="status"></div>
-    <progress id="bar" value="0" max="1"></progress>
-  </div>
+  <h2><span>Queue</span><button class="ghost" id="clear">Clear list</button></h2>
+  <div id="jobs"></div>
 
   <button id="reset">↺ Reset numbering (start again from 001)</button>
   <script src="popup.js"></script>

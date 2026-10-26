@@ -1,14 +1,15 @@
 const DEBUG_RAW_TS = false;
 const CONCURRENCY = 8;
-let current = null; // {tabId, title}
+let current = null; // {jobId}
 
 const send = m => chrome.runtime.sendMessage(m).catch(() => {});
 const abs = (u, base) => new URL(u, base).href;
 
-chrome.runtime.onMessage.addListener(msg => {
+chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg.type !== "process") return;
-  current = { tabId: msg.tabId, title: msg.title };
-  run(msg.url).catch(e => send({ type: "error", tabId: msg.tabId, error: String(e.message || e) }));
+  current = { jobId: msg.jobId };
+  run(msg.url).catch(e => send({ type: "error", jobId: msg.jobId, error: String(e.message || e) }));
+  reply({ ok: true });
 });
 
 async function getText(url) {
@@ -50,12 +51,11 @@ async function resolveMedia(url) {
 }
 
 function parseMedia({ url, text }) {
-  const segs = []; let key = null, seq = 0, map = null, dur = 0;
+  const segs = []; let key = null, seq = 0, map = null;
   const lines = text.split("\n").map(l => l.trim());
   const ms = lines.find(l => l.startsWith("#EXT-X-MEDIA-SEQUENCE:"));
   if (ms) seq = +ms.split(":")[1];
   for (const l of lines) {
-    if (l.startsWith("#EXTINF:")) dur += parseFloat(l.slice(8)) || 0;
     if (l.startsWith("#EXT-X-KEY")) {
       const method = /METHOD=([^,]+)/.exec(l)[1];
       if (method === "SAMPLE-AES") throw new Error("SAMPLE-AES/DRM streams are not supported");
@@ -69,12 +69,11 @@ function parseMedia({ url, text }) {
       segs.push({ url: abs(l, url), key, seq: seq++ });
     }
   }
-  return { segs, map, ended: text.includes("#EXT-X-ENDLIST"), duration: dur };
+  return { segs, map, ended: text.includes("#EXT-X-ENDLIST") };
 }
 
 const hexToBytes = h => Uint8Array.from(h.padStart(32, "0").match(/../g), b => parseInt(b, 16));
 
-// strips fake image headers etc. so data starts at real MPEG-TS
 function stripToTS(u8) {
   for (let i = 0; i < Math.min(u8.length, 4096); i++)
     if (u8[i] === 0x47 && u8[i + 188] === 0x47 && u8[i + 376] === 0x47) return i ? u8.subarray(i) : u8;
@@ -100,28 +99,32 @@ async function remux(results) {
   const all = new Uint8Array(total);
   let off = 0;
   for (const r of results) { all.set(r, off); off += r.length; }
-  results.length = 0; // let the segment copies be freed
+  results.length = 0;
 
   const f = await getFF();
-  await f.writeFile("in.ts", all);
-  const code = await f.exec([
-    "-i", "in.ts",
-    "-c", "copy",
-    "-bsf:a", "aac_adtstoasc",
-    "-avoid_negative_ts", "make_zero",
-    "-movflags", "+faststart",
-    "out.mp4"
-  ]);
-  if (code !== 0) throw new Error("ffmpeg failed with code " + code);
-  const out = await f.readFile("out.mp4");
-  await f.deleteFile("in.ts");
-  await f.deleteFile("out.mp4");
-  return new Blob([out], { type: "video/mp4" });
+  try {
+    await f.writeFile("in.ts", all);
+    const code = await f.exec([
+      "-i", "in.ts",
+      "-c", "copy",
+      "-bsf:a", "aac_adtstoasc",
+      "-avoid_negative_ts", "make_zero",
+      "-movflags", "+faststart",
+      "out.mp4"
+    ]);
+    if (code !== 0) throw new Error("ffmpeg failed with code " + code);
+    const out = await f.readFile("out.mp4");
+    return new Blob([out], { type: "video/mp4" });
+  } finally {
+    // always clean up so the next queued job starts with an empty filesystem
+    await f.deleteFile("in.ts").catch(() => {});
+    await f.deleteFile("out.mp4").catch(() => {});
+  }
 }
 
 async function run(m3u8Url) {
-  const { tabId } = current;
-  const report = (done, total, status) => send({ type: "progress", tabId, done, total, status });
+  const { jobId } = current;
+  const report = (done, total, status) => send({ type: "progress", jobId, done, total, status });
 
   report(0, 0, "Reading playlist…");
   const { segs, map, ended } = parseMedia(await resolveMedia(m3u8Url));
@@ -152,26 +155,25 @@ async function run(m3u8Url) {
     report(++done, segs.length, "Downloading…");
   });
 
-  if (initData) { // fMP4: already MP4, just concatenate
+  if (initData) {
     report(done, segs.length, "Saving…");
-    finish(new Blob([initData, ...results], { type: "video/mp4" }), "mp4", tabId);
+    finish(new Blob([initData, ...results], { type: "video/mp4" }), "mp4", jobId);
     return;
   }
 
   if (DEBUG_RAW_TS) {
     report(done, segs.length, "Saving raw .ts…");
-    finish(new Blob(results, { type: "video/mp2t" }), "ts", tabId);
+    finish(new Blob(results, { type: "video/mp2t" }), "ts", jobId);
     return;
   }
 
   report(done, segs.length, "Converting to MP4…");
-  finish(await remux(results), "mp4", tabId);
+  finish(await remux(results), "mp4", jobId);
 }
 
-
-function finish(blob, ext, tabId) {
-  if (!blob.size) return send({ type: "error", tabId, error: "Output is empty (unsupported codec/format?)" });
+function finish(blob, ext, jobId) {
+  if (!blob.size) return send({ type: "error", jobId, error: "Output is empty (unsupported codec/format?)" });
   const blobUrl = URL.createObjectURL(blob);
-  send({ type: "ready", tabId, blobUrl, ext });
+  send({ type: "ready", jobId, blobUrl, ext });
   setTimeout(() => URL.revokeObjectURL(blobUrl), 10 * 60 * 1000);
 }
