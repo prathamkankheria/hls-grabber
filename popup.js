@@ -15,7 +15,7 @@
 
   function enqueue(s) {
     return chrome.runtime.sendMessage({
-      type: "enqueue", url: s.url, referer: tab.url, title: tab.title
+      type: "enqueue", url: s.url, referer: tab.url, title: tab.title, tabId: tab.id
     });
   }
 
@@ -24,7 +24,7 @@
     refresh();
   };
   document.getElementById("clear").onclick = async () => {
-    await chrome.runtime.sendMessage({ type: "clear" });
+    await chrome.runtime.sendMessage({ type: "clear", tabId: tab.id });
     jobEls.forEach(j => j.el.remove());
     jobEls.clear();
     refresh();

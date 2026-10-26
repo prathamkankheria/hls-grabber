@@ -97,22 +97,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       // watchdog: a running job with no progress for 2 minutes would block the queue forever
       const stuck = jobs.find(j => j.status === "running" && Date.now() - (j.updated || 0) > 120000);
       if (stuck && stuck.updated) endJob(stuck, "error", "Timed out (no progress)");
-      reply({ streams: streams[msg.tabId] || [], jobs });
+      // downloads from other tabs keep running in the background but are hidden here
+      reply({ streams: streams[msg.tabId] || [], jobs: jobs.filter(j => j.tabId === msg.tabId) });
       return;
     }
 
     case "enqueue":
       if (!jobs.some(j => j.url === msg.url && (j.status === "queued" || j.status === "running"))) {
         jobs.push({
-          id: nextId++, url: msg.url, referer: msg.referer, title: msg.title || "",
+          id: nextId++, tabId: msg.tabId, url: msg.url, referer: msg.referer, title: msg.title || "",
           status: "queued", done: 0, total: 0, text: "Waiting…"
         });
         pump();
       }
       return;
 
-    case "clear": // remove everything except the running job
-      jobs = jobs.filter(j => j.status === "running");
+    case "clear": // remove this tab's finished/waiting jobs, keep running ones
+      jobs = jobs.filter(j => j.tabId !== msg.tabId || j.status === "running");
       return;
 
     case "progress":
