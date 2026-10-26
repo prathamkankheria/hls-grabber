@@ -7,7 +7,7 @@ onmessage = e => {
     if (!gotInit) { parts.push(seg.initSegment); gotInit = true; }
     parts.push(seg.data);
   });
-  tx.on("done", () => postMessage(new Blob(parts).slice(0)));
+  tx.on("done", () => postMessage(new Blob(parts, { type: "video/mp4" })));
   e.data.forEach(buf => tx.push(buf));
   tx.flush();
 };

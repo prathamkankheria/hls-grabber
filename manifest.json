@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "HLS Grabber",
-  "version": "1.0",
-  "permissions": ["webRequest", "downloads", "offscreen", "storage", "declarativeNetRequest"],
+  "version": "1.1",
+  "permissions": ["webRequest", "downloads", "offscreen", "declarativeNetRequest"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
   "action": { "default_popup": "popup.html" }
