@@ -1,3 +1,4 @@
+const DEBUG_RAW_TS = true;   // true = save raw .ts so we can test for audio; set false for MP4 output
 const CONCURRENCY = 8;
 const worker = new Worker("mux-worker.js");
 let current = null; // {tabId, title}
@@ -50,11 +51,12 @@ async function resolveMedia(url) {
 }
 
 function parseMedia({ url, text }) {
-  const segs = []; let key = null, seq = 0, map = null;
+  const segs = []; let key = null, seq = 0, map = null, dur = 0;
   const lines = text.split("\n").map(l => l.trim());
   const ms = lines.find(l => l.startsWith("#EXT-X-MEDIA-SEQUENCE:"));
   if (ms) seq = +ms.split(":")[1];
   for (const l of lines) {
+    if (l.startsWith("#EXTINF:")) dur += parseFloat(l.slice(8)) || 0;
     if (l.startsWith("#EXT-X-KEY")) {
       const method = /METHOD=([^,]+)/.exec(l)[1];
       if (method === "SAMPLE-AES") throw new Error("SAMPLE-AES/DRM streams are not supported");
@@ -68,7 +70,7 @@ function parseMedia({ url, text }) {
       segs.push({ url: abs(l, url), key, seq: seq++ });
     }
   }
-  return { segs, map, ended: text.includes("#EXT-X-ENDLIST") };
+  return { segs, map, ended: text.includes("#EXT-X-ENDLIST"), duration: dur };
 }
 
 const hexToBytes = h => Uint8Array.from(h.padStart(32, "0").match(/../g), b => parseInt(b, 16));
@@ -80,14 +82,12 @@ function stripToTS(u8) {
   return u8;
 }
 
-const safeName = t => (t || "video").replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "video";
-
 async function run(m3u8Url) {
-  const { tabId, title } = current;
+  const { tabId } = current;
   const report = (done, total, status) => send({ type: "progress", tabId, done, total, status });
 
   report(0, 0, "Reading playlist…");
-  const { segs, map, ended } = parseMedia(await resolveMedia(m3u8Url));
+  const { segs, map, ended, duration } = parseMedia(await resolveMedia(m3u8Url));
   if (!segs.length) throw new Error("No segments found in playlist");
 
   const results = new Array(segs.length);
@@ -115,23 +115,27 @@ async function run(m3u8Url) {
     report(++done, segs.length, "Downloading…");
   });
 
-  const filename = "video.mp4"; // real numbered name is assigned in background.js
-
   if (initData) { // fMP4: already MP4, just concatenate
     report(done, segs.length, "Saving…");
-    finish(new Blob([initData, ...results], { type: "video/mp4" }), filename, tabId);
+    finish(new Blob([initData, ...results], { type: "video/mp4" }), "mp4", tabId);
+    return;
+  }
+
+  if (DEBUG_RAW_TS) {
+    report(done, segs.length, "Saving raw .ts…");
+    finish(new Blob(results, { type: "video/mp2t" }), "ts", tabId);
     return;
   }
 
   report(done, segs.length, "Converting to MP4…");
-  worker.onmessage = e => finish(e.data, filename, tabId);
+  worker.onmessage = e => finish(e.data, "mp4", tabId);
   worker.onerror = e => send({ type: "error", tabId, error: "Remux failed: " + e.message });
-  worker.postMessage(results, results.map(r => r.buffer));
+  worker.postMessage({ segs: results, duration }, results.map(r => r.buffer));
 }
 
-function finish(blob, filename, tabId) {
+function finish(blob, ext, tabId) {
   if (!blob.size) return send({ type: "error", tabId, error: "Output is empty (unsupported codec/format?)" });
   const blobUrl = URL.createObjectURL(blob);
-  send({ type: "ready", tabId, blobUrl, filename });
+  send({ type: "ready", tabId, blobUrl, ext });
   setTimeout(() => URL.revokeObjectURL(blobUrl), 10 * 60 * 1000);
 }
