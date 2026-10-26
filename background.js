@@ -73,8 +73,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     return;
   }
   if (msg.type === "ready") {
-    chrome.downloads.download({ url: msg.blobUrl, filename: msg.filename, saveAs: false });
-    progress[msg.tabId] = { done: 1, total: 1, status: "Done ✔ " + msg.filename };
+    (async () => {
+      const { counter = 0 } = await chrome.storage.local.get("counter");
+      const n = counter + 1;
+      await chrome.storage.local.set({ counter: n });
+      const filename = String(n).padStart(3, "0") + ".mp4";
+      chrome.downloads.download({ url: msg.blobUrl, filename, saveAs: false });
+      progress[msg.tabId] = { done: 1, total: 1, status: "Done ✔ saved as " + filename };
+    })();
     return;
   }
   if (msg.type === "error") {

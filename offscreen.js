@@ -115,7 +115,7 @@ async function run(m3u8Url) {
     report(++done, segs.length, "Downloading…");
   });
 
-  const filename = safeName(title) + ".mp4";
+  const filename = "video.mp4"; // real numbered name is assigned in background.js
 
   if (initData) { // fMP4: already MP4, just concatenate
     report(done, segs.length, "Saving…");
