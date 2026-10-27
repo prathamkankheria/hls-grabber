@@ -61,4 +61,4 @@ Use this tool only for content you have the right to download. You are responsib
 
 ## License
 
-[MIT](LICENSE). ffmpeg.wasm and FFmpeg are distributed under their own licenses (FFmpeg is LGPL/GPL depending on build).
+[MIT](LICENSE). Made by [Pratham Kankheria](https://github.com/prathamkankheria). ffmpeg.wasm and FFmpeg are distributed under their own licenses (FFmpeg is LGPL/GPL depending on build).
