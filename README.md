@@ -27,26 +27,27 @@ A Chrome extension (Manifest V3) that detects HLS (`.m3u8`) streams on a page, d
 
 ### File naming
 
-`content.js` remembers the text of the last clicked element whose class contains `ClassName` / `class-name`. That title is kept per tab and passed to a video opened in a new tab, so it still applies when the video is on a different page from the list. To support other sites, edit `SELECTORS` in `content.js`.
+`src/content.js` remembers the text of the last clicked element whose class contains `ClassName` / `class-name`. That title is kept per tab and passed to a video opened in a new tab, so it still applies when the video is on a different page from the list. To support other sites, edit `SELECTORS` in `src/content.js`.
 
 ### Settings in code
 
 | Setting | File | Default |
 | --- | --- | --- |
-| `MAX_PARALLEL` | `background.js` | `3` |
-| `CONCURRENCY` (segments fetched at once per job) | `offscreen.js` | `8` |
+| `MAX_PARALLEL` | `src/background.js` | `3` |
+| `CONCURRENCY` (segments fetched at once per job) | `src/offscreen/offscreen.js` | `8` |
 
 ## Project structure
 
-| File | Purpose |
-| --- | --- |
-| `manifest.json` | Extension manifest |
-| `background.js` | Stream detection, job queue, header rules, downloads |
-| `offscreen.html` / `offscreen.js` | Fetches segments, decrypts, remuxes with ffmpeg |
-| `content.js` | Captures the clicked item's title for file naming |
-| `popup.html` / `popup.js` | Popup UI |
-| `ffmpeg.js`, `ffmpeg-core.js`, `ffmpeg-core.wasm`, `814.ffmpeg.js` | Bundled ffmpeg.wasm |
-| `icon*.png` | Extension icons |
+```
+manifest.json
+src/
+  background.js          Stream detection, job queue, header rules, downloads
+  content.js             Captures the clicked item's title for file naming
+  popup/                 Popup UI (popup.html, popup.js)
+  offscreen/             Fetches segments, decrypts, remuxes with ffmpeg
+lib/ffmpeg/              Bundled ffmpeg.wasm (ffmpeg.js, ffmpeg-core.js/.wasm, 814.ffmpeg.js)
+icons/                   Extension icons (icon16/32/48/128.png) and source.png
+```
 
 ## Limitations
 
