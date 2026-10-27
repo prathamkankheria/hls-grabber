@@ -1,7 +1,16 @@
 const streams = {};   // tabId -> [{url}]
 let jobs = [];        // global queue: {id, url, referer, title, status, done, total, text}
 let nextId = 1;
-let running = false;
+const MAX_PARALLEL = 3;
+const lastTitle = {}; // tabId -> name of the last clicked item (survives page navigation)
+const titlesReady = chrome.storage.session.get("lastTitle").then(r => Object.assign(lastTitle, r.lastTitle || {}));
+const saveTitles = () => chrome.storage.session.set({ lastTitle });
+
+// a video opened in a new tab inherits the title from the tab that opened it
+chrome.tabs.onCreated.addListener(async t => {
+  await titlesReady;
+  if (t.openerTabId != null && lastTitle[t.openerTabId]) { lastTitle[t.id] = lastTitle[t.openerTabId]; saveTitles(); }
+});
 
 function addStream(d) {
   if (d.tabId < 0) return;
@@ -15,7 +24,7 @@ chrome.webRequest.onHeadersReceived.addListener(d => {
   if (/\.m3u8/i.test(d.url) || ct.includes("mpegurl")) addStream(d);
 }, { urls: ["<all_urls>"] }, ["responseHeaders"]);
 
-chrome.tabs.onRemoved.addListener(id => { delete streams[id]; });
+chrome.tabs.onRemoved.addListener(id => { delete streams[id]; delete lastTitle[id]; saveTitles(); });
 chrome.tabs.onUpdated.addListener((id, info) => {
   if (info.status === "loading" && info.url) {
     streams[id] = [];
@@ -32,13 +41,13 @@ async function ensureOffscreen() {
   });
 }
 
-async function setHeaderRule(streamUrl, referer) {
+async function setHeaderRule(id, streamUrl, referer) {
   const host = new URL(streamUrl).hostname;
   const parent = host.split(".").slice(-2).join(".");
   await chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [1],
+    removeRuleIds: [id],
     addRules: [{
-      id: 1, priority: 1,
+      id, priority: 1,
       action: {
         type: "modifyHeaders",
         requestHeaders: [
@@ -55,23 +64,27 @@ async function setHeaderRule(streamUrl, referer) {
 }
 
 function endJob(job, status, text) {
+  if (job.status !== "running") return;
   job.status = status;
   job.text = text;
-  running = false;
+  chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [job.id] }).catch(() => {});
   pump();
 }
 
 function pump() {
-  if (running) return;
-  const job = jobs.find(j => j.status === "queued");
-  if (!job) return;
-  running = true;
+  let job;
+  while (jobs.filter(j => j.status === "running").length < MAX_PARALLEL && (job = jobs.find(j => j.status === "queued"))) {
+    startJob(job);
+  }
+}
+
+function startJob(job) {
   job.status = "running";
   job.text = "Starting…";
   job.updated = Date.now();
   (async () => {
     try {
-      await setHeaderRule(job.url, job.referer);
+      await setHeaderRule(job.id, job.url, job.referer);
       await ensureOffscreen();
       // the offscreen document may not have registered its listener yet, so retry until it acks
       let acked = false;
@@ -102,32 +115,59 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       return;
     }
 
+    case "clickedTitle":
+      titlesReady.then(() => {
+        if (_sender.tab) { lastTitle[_sender.tab.id] = msg.title; saveTitles(); }
+      });
+      return;
+
     case "enqueue":
-      if (!jobs.some(j => j.url === msg.url && (j.status === "queued" || j.status === "running"))) {
+      titlesReady.then(() => {
+        if (jobs.some(j => j.url === msg.url && (j.status === "queued" || j.status === "running"))) return;
         jobs.push({
-          id: nextId++, tabId: msg.tabId, url: msg.url, referer: msg.referer, title: msg.title || "",
+          id: nextId++, tabId: msg.tabId, url: msg.url, referer: msg.referer,
+          title: lastTitle[msg.tabId] || msg.title || "", named: !!lastTitle[msg.tabId],
           status: "queued", done: 0, total: 0, text: "Waiting…"
         });
         pump();
-      }
-      return;
+        reply();
+      });
+      return true;
 
     case "clear": // remove this tab's finished/waiting jobs, keep running ones
       jobs = jobs.filter(j => j.tabId !== msg.tabId || j.status === "running");
       return;
 
+    case "cancel":
+      if (!job) return;
+      if (job.status === "queued") jobs = jobs.filter(j => j !== job);
+      else if (job.status === "running") {
+        endJob(job, "cancelled", "Cancelled");
+        chrome.runtime.sendMessage({ type: "abort", jobId: job.id }).catch(() => {});
+      }
+      return;
+
     case "progress":
-      if (job) { job.done = msg.done; job.total = msg.total; job.text = msg.status; job.updated = Date.now(); }
+      if (job && job.status === "running") { job.done = msg.done; job.total = msg.total; job.text = msg.status; job.updated = Date.now(); }
       return;
 
     case "ready":
-      if (!job) return;
+      if (!job || job.status !== "running") return;
       (async () => {
-        const { counter = 0 } = await chrome.storage.local.get("counter");
-        const n = counter + 1;
-        await chrome.storage.local.set({ counter: n });
-        const filename = String(n).padStart(3, "0") + "." + (msg.ext || "mp4");
-        chrome.downloads.download({ url: msg.blobUrl, filename, saveAs: false });
+        const ext = msg.ext || "mp4";
+        let filename;
+        const clean = job.named
+          ? job.title.replace(/[\\/:*?"<>|\x00-\x1f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120).replace(/[. ]+$/, "")
+          : "";
+        if (clean) {
+          filename = clean + "." + ext;
+        } else {
+          const { counter = 0 } = await chrome.storage.local.get("counter");
+          const n = counter + 1;
+          await chrome.storage.local.set({ counter: n });
+          filename = String(n).padStart(3, "0") + "." + ext;
+        }
+        chrome.downloads.download({ url: msg.blobUrl, filename, saveAs: false, conflictAction: "uniquify" });
         job.done = job.total || 1;
         endJob(job, "done", "Saved as " + filename);
       })();

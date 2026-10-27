@@ -1,45 +1,52 @@
 const DEBUG_RAW_TS = false;
 const CONCURRENCY = 8;
-let current = null; // {jobId}
+let current = null;
 
 const send = m => chrome.runtime.sendMessage(m).catch(() => {});
 const abs = (u, base) => new URL(u, base).href;
 
+const controllers = new Map(); // jobId -> AbortController
+
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+  if (msg.type === "abort") { controllers.get(msg.jobId)?.abort(); return; }
   if (msg.type !== "process") return;
-  current = { jobId: msg.jobId };
-  run(msg.url).catch(e => send({ type: "error", jobId: msg.jobId, error: String(e.message || e) }));
+  const ctl = new AbortController();
+  controllers.set(msg.jobId, ctl);
+  run(msg.url, msg.jobId, ctl.signal)
+    .catch(e => { if (!ctl.signal.aborted) send({ type: "error", jobId: msg.jobId, error: String(e.message || e) }); })
+    .finally(() => controllers.delete(msg.jobId));
   reply({ ok: true });
 });
 
-async function getText(url) {
-  const r = await fetch(url, { credentials: "include" });
+async function getText(url, signal) {
+  const r = await fetch(url, { credentials: "include", signal });
   if (!r.ok) throw new Error(`Playlist HTTP ${r.status}`);
   return r.text();
 }
 
-async function fetchRetry(url, tries = 4) {
+async function fetchRetry(url, signal, tries = 4) {
   for (let i = 0; i < tries; i++) {
+    signal.throwIfAborted();
     try {
-      const r = await fetch(url, { credentials: "include" });
+      const r = await fetch(url, { credentials: "include", signal });
       if (!r.ok) throw new Error(`HTTP ${r.status} for ${url.slice(-60)}`);
       return new Uint8Array(await r.arrayBuffer());
     } catch (e) {
-      if (i === tries - 1) throw e;
+      if (signal.aborted || i === tries - 1) throw e;
       await new Promise(r => setTimeout(r, 500 * 2 ** i));
     }
   }
 }
 
-async function pool(n, limit, fn) {
+async function pool(n, limit, fn, signal) {
   let next = 0;
   await Promise.all(Array.from({ length: limit }, async () => {
-    while (next < n) await fn(next++);
+    while (next < n) { signal.throwIfAborted(); await fn(next++); }
   }));
 }
 
-async function resolveMedia(url) {
-  const text = await getText(url);
+async function resolveMedia(url, signal) {
+  const text = await getText(url, signal);
   if (!text.includes("#EXT-X-STREAM-INF")) return { url, text };
   const lines = text.split("\n").map(l => l.trim());
   let best = { bw: -1, uri: null };
@@ -47,7 +54,7 @@ async function resolveMedia(url) {
     const m = l.match(/BANDWIDTH=(\d+)/);
     if (l.startsWith("#EXT-X-STREAM-INF") && m && +m[1] > best.bw) best = { bw: +m[1], uri: lines[i + 1] };
   });
-  return resolveMedia(abs(best.uri, url));
+  return resolveMedia(abs(best.uri, url), signal);
 }
 
 function parseMedia({ url, text }) {
@@ -80,20 +87,18 @@ function stripToTS(u8) {
   return u8;
 }
 
-let ff = null;
-async function getFF() {
-  if (ff) return ff;
+// each job gets its own ffmpeg instance so conversions can run in parallel
+async function newFF() {
   const f = new FFmpegWASM.FFmpeg();
   await f.load({
     coreURL: chrome.runtime.getURL("ffmpeg-core.js"),
     wasmURL: chrome.runtime.getURL("ffmpeg-core.wasm"),
     classWorkerURL: chrome.runtime.getURL("814.ffmpeg.js")
   });
-  ff = f;
-  return ff;
+  return f;
 }
 
-async function remux(results) {
+async function remux(results, signal) {
   let total = 0;
   for (const r of results) total += r.length;
   const all = new Uint8Array(total);
@@ -101,8 +106,11 @@ async function remux(results) {
   for (const r of results) { all.set(r, off); off += r.length; }
   results.length = 0;
 
-  const f = await getFF();
+  const f = await newFF();
+  const onAbort = () => { try { f.terminate(); } catch {} };
+  signal.addEventListener("abort", onAbort);
   try {
+    signal.throwIfAborted();
     await f.writeFile("in.ts", all);
     const code = await f.exec([
       "-i", "in.ts",
@@ -116,18 +124,16 @@ async function remux(results) {
     const out = await f.readFile("out.mp4");
     return new Blob([out], { type: "video/mp4" });
   } finally {
-    // always clean up so the next queued job starts with an empty filesystem
-    await f.deleteFile("in.ts").catch(() => {});
-    await f.deleteFile("out.mp4").catch(() => {});
+    signal.removeEventListener("abort", onAbort);
+    try { f.terminate(); } catch {}
   }
 }
 
-async function run(m3u8Url) {
-  const { jobId } = current;
-  const report = (done, total, status) => send({ type: "progress", jobId, done, total, status });
+async function run(m3u8Url, jobId, signal) {
+  const report = (done, total, status) => { if (!signal.aborted) send({ type: "progress", jobId, done, total, status }); };
 
   report(0, 0, "Reading playlist…");
-  const { segs, map, ended } = parseMedia(await resolveMedia(m3u8Url));
+  const { segs, map, ended } = parseMedia(await resolveMedia(m3u8Url, signal));
   if (!segs.length) throw new Error("No segments found in playlist");
 
   const results = new Array(segs.length);
@@ -135,14 +141,14 @@ async function run(m3u8Url) {
   let done = 0;
   report(0, segs.length, ended ? "Downloading…" : "Downloading (live/incomplete stream)…");
 
-  const initData = map ? await fetchRetry(map) : null;
+  const initData = map ? await fetchRetry(map, signal) : null;
 
   await pool(segs.length, CONCURRENCY, async i => {
     const s = segs[i];
-    let data = await fetchRetry(s.url);
+    let data = await fetchRetry(s.url, signal);
     if (s.key) {
       if (!keyCache.has(s.key.uri)) {
-        keyCache.set(s.key.uri, fetchRetry(s.key.uri).then(raw =>
+        keyCache.set(s.key.uri, fetchRetry(s.key.uri, signal).then(raw =>
           crypto.subtle.importKey("raw", raw, "AES-CBC", false, ["decrypt"])));
       }
       const ck = await keyCache.get(s.key.uri);
@@ -153,7 +159,7 @@ async function run(m3u8Url) {
     }
     results[i] = initData ? data : stripToTS(data);
     report(++done, segs.length, "Downloading…");
-  });
+  }, signal);
 
   if (initData) {
     report(done, segs.length, "Saving…");
@@ -168,7 +174,9 @@ async function run(m3u8Url) {
   }
 
   report(done, segs.length, "Converting to MP4…");
-  finish(await remux(results), "mp4", jobId);
+  const mp4 = await remux(results, signal);
+  signal.throwIfAborted();
+  finish(mp4, "mp4", jobId);
 }
 
 function finish(blob, ext, jobId) {

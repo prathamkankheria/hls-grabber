@@ -104,29 +104,42 @@
         name.title = pretty(j.url);
         const state = document.createElement("div");
         state.className = "state";
-        row.append(badge, name, state);
+        const cancel = document.createElement("button");
+        cancel.className = "ghost small";
+        cancel.textContent = "✕";
+        cancel.title = "Cancel";
+        cancel.onclick = async () => {
+          await chrome.runtime.sendMessage({ type: "cancel", jobId: j.id });
+          refresh();
+        };
+        row.append(badge, name, state, cancel);
         const bar = document.createElement("progress");
         const txt = document.createElement("div");
         txt.className = "txt";
         el.append(row, bar, txt);
         jobsEl.appendChild(el);
-        r = { el, state, txt, bar };
+        r = { el, state, txt, bar, cancel };
         jobEls.set(j.id, r);
       }
       r.el.className = "job " + j.status;
-      r.state.textContent = { queued: "queued", running: "running", done: "done ✔", error: "failed" }[j.status];
+      r.cancel.style.display = j.status === "queued" || j.status === "running" ? "" : "none";
+      r.state.textContent = { queued: "queued", running: "running", done: "done ✔", error: "failed", cancelled: "cancelled" }[j.status];
       r.txt.textContent = j.text + (j.status === "running" && j.total > 1 ? ` (${j.done}/${j.total})` : "");
       r.bar.style.display = j.status === "running" && j.total > 1 ? "block" : "none";
       r.bar.max = j.total || 1;
       r.bar.value = j.done;
     });
 
+    // drop rows for jobs that were removed (e.g. cancelled while queued)
+    const ids = new Set(jobs.map(j => j.id));
+    jobEls.forEach((r, id) => { if (!ids.has(id)) { r.el.remove(); jobEls.delete(id); } });
+
     if (!jobs.length) jobsEl.innerHTML = '<div class="empty">Nothing queued yet.</div>';
     else jobsEl.querySelector(".empty")?.remove();
 
     // mark cards that are already in the queue
     cards.forEach(c => {
-      const inQ = jobs.some(j => j.url === c.url && j.status !== "error");
+      const inQ = jobs.some(j => j.url === c.url && j.status !== "error" && j.status !== "cancelled");
       c.dl.textContent = inQ ? "✔ In queue" : "+ Queue";
       c.dl.classList.toggle("in", inQ);
     });
