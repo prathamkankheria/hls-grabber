@@ -49,12 +49,25 @@ async function resolveMedia(url, signal) {
   const text = await getText(url, signal);
   if (!text.includes("#EXT-X-STREAM-INF")) return { url, text };
   const lines = text.split("\n").map(l => l.trim());
-  let best = { bw: -1, uri: null };
+  let best = { bw: -1, uri: null, attrs: "" };
   lines.forEach((l, i) => {
     const m = l.match(/BANDWIDTH=(\d+)/);
-    if (l.startsWith("#EXT-X-STREAM-INF") && m && +m[1] > best.bw) best = { bw: +m[1], uri: lines[i + 1] };
+    if (l.startsWith("#EXT-X-STREAM-INF") && m && +m[1] > best.bw) best = { bw: +m[1], uri: lines[i + 1], attrs: l };
   });
-  return resolveMedia(abs(best.uri, url), signal);
+  const video = await resolveMedia(abs(best.uri, url), signal);
+
+  // separate audio rendition referenced by the chosen variant
+  const group = /AUDIO="([^"]+)"/.exec(best.attrs)?.[1];
+  if (group) {
+    const renditions = lines.filter(l => l.startsWith("#EXT-X-MEDIA") && /TYPE=AUDIO/.test(l) &&
+      l.includes(`GROUP-ID="${group}"`) && /URI="/.test(l));
+    const pick = renditions.find(l => /DEFAULT=YES/.test(l)) || renditions[0];
+    if (pick) {
+      const audio = await resolveMedia(abs(/URI="([^"]+)"/.exec(pick)[1], url), signal);
+      return { ...video, audio };
+    }
+  }
+  return video;
 }
 
 function parseMedia({ url, text }) {
@@ -98,22 +111,27 @@ async function newFF() {
   return f;
 }
 
-async function remux(results, signal) {
+const concat = parts => {
   let total = 0;
-  for (const r of results) total += r.length;
+  for (const r of parts) total += r.length;
   const all = new Uint8Array(total);
   let off = 0;
-  for (const r of results) { all.set(r, off); off += r.length; }
-  results.length = 0;
+  for (const r of parts) { all.set(r, off); off += r.length; }
+  return all;
+};
 
+// inputs: [{name, data}] - one input is remuxed to mp4, two are muxed (video + separate audio)
+async function remux(inputs, signal) {
   const f = await newFF();
   const onAbort = () => { try { f.terminate(); } catch {} };
   signal.addEventListener("abort", onAbort);
   try {
     signal.throwIfAborted();
-    await f.writeFile("in.ts", all);
+    for (const i of inputs) { await f.writeFile(i.name, i.data); i.data = null; }
+    const maps = inputs.length > 1 ? ["-map", "0:v:0", "-map", "1:a:0"] : [];
     const code = await f.exec([
-      "-i", "in.ts",
+      ...inputs.flatMap(i => ["-i", i.name]),
+      ...maps,
       "-c", "copy",
       "-bsf:a", "aac_adtstoasc",
       "-avoid_negative_ts", "make_zero",
@@ -129,18 +147,10 @@ async function remux(results, signal) {
   }
 }
 
-async function run(m3u8Url, jobId, signal) {
-  const report = (done, total, status) => { if (!signal.aborted) send({ type: "progress", jobId, done, total, status }); };
-
-  report(0, 0, "Reading playlist…");
-  const { segs, map, ended } = parseMedia(await resolveMedia(m3u8Url, signal));
-  if (!segs.length) throw new Error("No segments found in playlist");
-
+async function downloadTrack(track, signal, onSegment) {
+  const { segs, map } = track;
   const results = new Array(segs.length);
   const keyCache = new Map();
-  let done = 0;
-  report(0, segs.length, ended ? "Downloading…" : "Downloading (live/incomplete stream)…");
-
   const initData = map ? await fetchRetry(map, signal) : null;
 
   await pool(segs.length, CONCURRENCY, async i => {
@@ -158,23 +168,50 @@ async function run(m3u8Url, jobId, signal) {
       data = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-CBC", iv }, ck, data));
     }
     results[i] = initData ? data : stripToTS(data);
-    report(++done, segs.length, "Downloading…");
+    onSegment();
   }, signal);
 
-  if (initData) {
-    report(done, segs.length, "Saving…");
-    finish(new Blob([initData, ...results], { type: "video/mp4" }), "mp4", jobId);
+  return { parts: initData ? [initData, ...results] : results, fmp4: !!initData };
+}
+
+async function run(m3u8Url, jobId, signal) {
+  const report = (done, total, status) => { if (!signal.aborted) send({ type: "progress", jobId, done, total, status }); };
+
+  report(0, 0, "Reading playlist…");
+  const resolved = await resolveMedia(m3u8Url, signal);
+  const tracks = [parseMedia(resolved)];
+  if (resolved.audio) tracks.push(parseMedia(resolved.audio));
+  if (tracks.some(t => !t.segs.length)) throw new Error("No segments found in playlist");
+
+  const total = tracks.reduce((n, t) => n + t.segs.length, 0);
+  let done = 0;
+  const label = !tracks[0].ended ? "Downloading (live/incomplete stream)…" :
+    tracks.length > 1 ? "Downloading video + audio…" : "Downloading…";
+  report(0, total, label);
+
+  // video and audio download at the same time
+  const downloaded = await Promise.all(tracks.map(t =>
+    downloadTrack(t, signal, () => report(++done, total, label))));
+
+  if (downloaded.length === 1 && downloaded[0].fmp4) {
+    report(done, total, "Saving…");
+    finish(new Blob(downloaded[0].parts, { type: "video/mp4" }), "mp4", jobId);
     return;
   }
 
-  if (DEBUG_RAW_TS) {
-    report(done, segs.length, "Saving raw .ts…");
-    finish(new Blob(results, { type: "video/mp2t" }), "ts", jobId);
+  if (DEBUG_RAW_TS && downloaded.length === 1) {
+    report(done, total, "Saving raw .ts…");
+    finish(new Blob(downloaded[0].parts, { type: "video/mp2t" }), "ts", jobId);
     return;
   }
 
-  report(done, segs.length, "Converting to MP4…");
-  const mp4 = await remux(results, signal);
+  report(done, total, downloaded.length > 1 ? "Merging video + audio…" : "Converting to MP4…");
+  const inputs = downloaded.map((d, i) => ({
+    name: (i ? "audio" : "video") + (d.fmp4 ? ".mp4" : ".ts"),
+    data: concat(d.parts)
+  }));
+  downloaded.forEach(d => { d.parts.length = 0; });
+  const mp4 = await remux(inputs, signal);
   signal.throwIfAborted();
   finish(mp4, "mp4", jobId);
 }

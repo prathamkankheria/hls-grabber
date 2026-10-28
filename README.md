@@ -7,6 +7,7 @@ A Chrome extension (Manifest V3) that detects HLS (`.m3u8`) streams on a page, d
 - Detects `.m3u8` streams per tab, with a badge showing the count
 - Picks the highest-bandwidth variant from master playlists
 - Supports AES-128 encrypted streams and fMP4 (`EXT-X-MAP`) streams
+- Streams with **separate video and audio playlists** are downloaded together and merged automatically into one `.mp4`
 - Download queue with up to **3 parallel downloads**
 - **Cancel** button for queued and running jobs
 - Per-tab queue view: downloads from other tabs keep running in the background
@@ -53,7 +54,8 @@ icons/                   Extension icons (icon16/32/48/128.png) and source.png
 
 - DRM / SAMPLE-AES streams are not supported.
 - Videos are assembled in memory, so very large videos and many parallel jobs use a lot of RAM.
-- Streams with separate audio and video playlists are not merged.
+- Only the default audio track is merged when a stream offers several languages.
+- Separate subtitle tracks are not downloaded.
 
 ## Disclaimer
 
